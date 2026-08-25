@@ -105,28 +105,46 @@ def send_journal(chat_id):
 
     text = (
         f"📝 <b>Trade Journal</b>\n\n"
-        f"Open: {stats['open']}  |  Wins: {stats['wins']}  |  Losses: {stats['losses']}  |  "
-        f"Win rate: {stats['win_rate']}%\n\n"
+        f"⏳ Open: <b>{stats['open']}</b>   ✅ Wins: <b>{stats['wins']}</b>   "
+        f"❌ Losses: <b>{stats['losses']}</b>   🎯 Win rate: <b>{stats['win_rate']}%</b>\n\n"
     )
 
     if not trades:
-        text += "No trades saved yet. Use /calculate and tap 💾 Save to Journal."
+        text += "No trades saved yet. Use /calculate — every result is saved here automatically."
         bot.send_message(chat_id, text, reply_markup=main_menu_keyboard())
         return
 
-    kb = types.InlineKeyboardMarkup(row_width=2)
     for t in trades:
         status_icon = {"open": "⏳", "win": "✅", "loss": "❌"}[t["status"]]
         text += (f"{status_icon} #{t['id']} <b>{t['instrument']}</b> {t['direction']} — "
-                  f"Entry {t['entry']} / SL {t['stop']} / {t['lot_size']} lots "
-                  f"<i>({t['timestamp']})</i>\n")
-        if t["status"] == "open":
-            kb.add(
-                types.InlineKeyboardButton(f"✅ #{t['id']} Win", callback_data=f"win_{t['id']}"),
-                types.InlineKeyboardButton(f"❌ #{t['id']} Loss", callback_data=f"loss_{t['id']}"),
-            )
+                  f"{t['entry']} → {t['stop']}, {t['lot_size']} lots\n")
 
-    bot.send_message(chat_id, text, reply_markup=kb if kb.keyboard else main_menu_keyboard())
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    open_trades = [t for t in trades if t["status"] == "open"]
+    if open_trades:
+        kb.add(types.InlineKeyboardButton("🔧 Close a Trade", callback_data="close_menu"))
+    kb.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu"))
+
+    bot.send_message(chat_id, text, reply_markup=kb)
+
+
+def send_close_menu(chat_id):
+    trades = get_trades(chat_id, limit=8)
+    open_trades = [t for t in trades if t["status"] == "open"]
+
+    if not open_trades:
+        bot.send_message(chat_id, "No open trades to close.", reply_markup=main_menu_keyboard())
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for t in open_trades:
+        kb.add(types.InlineKeyboardButton(
+            f"#{t['id']} {t['instrument']} {t['direction']} @ {t['entry']}",
+            callback_data=f"pick_{t['id']}"
+        ))
+    kb.add(types.InlineKeyboardButton("⬅️ Back", callback_data="history"))
+
+    bot.send_message(chat_id, "Which trade do you want to close?", reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -145,20 +163,34 @@ def handle_buttons(call):
         bot.edit_message_text("Pick an instrument:", chat_id, call.message.message_id,
                                reply_markup=instrument_keyboard())
 
+    elif call.data == "menu":
+        bot.edit_message_text(
+            "👋 <b>Welcome to your Market Bot</b>\n\nChoose an option below, or type / to see all commands.",
+            chat_id, call.message.message_id, reply_markup=main_menu_keyboard()
+        )
+
     elif call.data == "history":
         bot.delete_message(chat_id, call.message.message_id)
         send_journal(chat_id)
+
+    elif call.data == "close_menu":
+        bot.delete_message(chat_id, call.message.message_id)
+        send_close_menu(chat_id)
+
+    elif call.data.startswith("pick_"):
+        trade_id = int(call.data.replace("pick_", ""))
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton("✅ Win", callback_data=f"win_{trade_id}"),
+            types.InlineKeyboardButton("❌ Loss", callback_data=f"loss_{trade_id}"),
+        )
+        bot.edit_message_text(f"Mark trade #{trade_id} as:", chat_id, call.message.message_id, reply_markup=kb)
 
     elif call.data.startswith("calc_"):
         instrument = call.data.replace("calc_", "")
         user_data[chat_id] = {"instrument": instrument}
         bot.send_message(chat_id, f"Selected <b>{instrument}</b>.\n\nWhat is your account balance (USD)?")
         bot.register_next_step_handler(call.message, calc_balance)
-
-    elif call.data.startswith("save_"):
-        trade_id = call.data.replace("save_", "")
-        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-        bot.send_message(chat_id, "💾 Saved to your journal. Check /history anytime.")
 
     elif call.data.startswith("win_") or call.data.startswith("loss_"):
         outcome, trade_id = call.data.split("_")
