@@ -1,13 +1,16 @@
 """
 bot.py
-The live Telegram bot with a professional look: command menu, inline buttons,
-and polished HTML-formatted reports.
+The live Telegram bot: command menu, inline buttons, market reports with
+RSI-backed bias, position calculator, and a trade journal.
 """
 
 from flask import Flask, request
 import telebot
 from telebot import types
-from helpers import build_market_report, calculate_position, LOT_SIZES
+from helpers import (
+    build_market_report, calculate_position, LOT_SIZES,
+    add_trade, get_trades, close_trade, get_journal_stats
+)
 
 # ============ FILL THIS IN ============
 BOT_TOKEN = "8772965274:AAH-oULagaBtC1lEkojRslTqkD18ifjTY6c"
@@ -18,11 +21,11 @@ app = Flask(__name__)
 
 user_data = {}
 
-# ---- Register the "/" command menu popup ----
 bot.set_my_commands([
     types.BotCommand("start", "Open the main menu"),
     types.BotCommand("market", "Get calendar, news, prices & bias"),
     types.BotCommand("calculate", "Position size & stop loss calculator"),
+    types.BotCommand("history", "View your trade journal"),
     types.BotCommand("help", "How to use this bot"),
 ])
 
@@ -32,6 +35,7 @@ def main_menu_keyboard():
     kb.add(
         types.InlineKeyboardButton("📊  Market Update", callback_data="market"),
         types.InlineKeyboardButton("🧮  Position Calculator", callback_data="calculate"),
+        types.InlineKeyboardButton("📝  Trade Journal", callback_data="history"),
         types.InlineKeyboardButton("ℹ️  Help", callback_data="help"),
     )
     return kb
@@ -51,9 +55,11 @@ def instrument_keyboard():
 HELP_TEXT = (
     "<b>🤖 Market Bot — Help</b>\n\n"
     "📊 <b>Market Update</b> — this week's high-impact events, latest news, "
-    "live prices, and a simple trend bias for Gold, Silver, Bitcoin & Ethereum.\n\n"
+    "live prices, and a trend + RSI bias for Gold, Silver, Bitcoin & Ethereum.\n\n"
     "🧮 <b>Position Calculator</b> — enter your account balance, risk %, entry "
     "and stop loss price, and get your position size and lot size.\n\n"
+    "📝 <b>Trade Journal</b> — save calculator results as trades, then mark "
+    "them Win or Loss later to track your stats.\n\n"
     "⚠️ <i>This bot provides data and calculations only — not financial advice.</i>"
 )
 
@@ -82,34 +88,84 @@ def calculate_start(message):
     bot.send_message(message.chat.id, "Pick an instrument:", reply_markup=instrument_keyboard())
 
 
+@bot.message_handler(commands=["history"])
+def history(message):
+    send_journal(message.chat.id)
+
+
 def send_market_report(chat_id):
     msg = bot.send_message(chat_id, "⏳ Fetching latest data...")
     report = build_market_report()
     bot.edit_message_text(report, chat_id, msg.message_id, reply_markup=main_menu_keyboard())
 
 
-# ---- Handle all button taps ----
+def send_journal(chat_id):
+    trades = get_trades(chat_id, limit=8)
+    stats = get_journal_stats(chat_id)
+
+    text = (
+        f"📝 <b>Trade Journal</b>\n\n"
+        f"Open: {stats['open']}  |  Wins: {stats['wins']}  |  Losses: {stats['losses']}  |  "
+        f"Win rate: {stats['win_rate']}%\n\n"
+    )
+
+    if not trades:
+        text += "No trades saved yet. Use /calculate and tap 💾 Save to Journal."
+        bot.send_message(chat_id, text, reply_markup=main_menu_keyboard())
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    for t in trades:
+        status_icon = {"open": "⏳", "win": "✅", "loss": "❌"}[t["status"]]
+        text += (f"{status_icon} #{t['id']} <b>{t['instrument']}</b> {t['direction']} — "
+                  f"Entry {t['entry']} / SL {t['stop']} / {t['lot_size']} lots "
+                  f"<i>({t['timestamp']})</i>\n")
+        if t["status"] == "open":
+            kb.add(
+                types.InlineKeyboardButton(f"✅ #{t['id']} Win", callback_data=f"win_{t['id']}"),
+                types.InlineKeyboardButton(f"❌ #{t['id']} Loss", callback_data=f"loss_{t['id']}"),
+            )
+
+    bot.send_message(chat_id, text, reply_markup=kb if kb.keyboard else main_menu_keyboard())
+
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_buttons(call):
     bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
 
     if call.data == "market":
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        send_market_report(call.message.chat.id)
+        bot.delete_message(chat_id, call.message.message_id)
+        send_market_report(chat_id)
 
     elif call.data == "help":
-        bot.edit_message_text(HELP_TEXT, call.message.chat.id, call.message.message_id,
-                               reply_markup=main_menu_keyboard())
+        bot.edit_message_text(HELP_TEXT, chat_id, call.message.message_id, reply_markup=main_menu_keyboard())
 
     elif call.data == "calculate":
-        bot.edit_message_text("Pick an instrument:", call.message.chat.id, call.message.message_id,
+        bot.edit_message_text("Pick an instrument:", chat_id, call.message.message_id,
                                reply_markup=instrument_keyboard())
+
+    elif call.data == "history":
+        bot.delete_message(chat_id, call.message.message_id)
+        send_journal(chat_id)
 
     elif call.data.startswith("calc_"):
         instrument = call.data.replace("calc_", "")
-        user_data[call.message.chat.id] = {"instrument": instrument}
-        bot.send_message(call.message.chat.id, f"Selected <b>{instrument}</b>.\n\nWhat is your account balance (USD)?")
+        user_data[chat_id] = {"instrument": instrument}
+        bot.send_message(chat_id, f"Selected <b>{instrument}</b>.\n\nWhat is your account balance (USD)?")
         bot.register_next_step_handler(call.message, calc_balance)
+
+    elif call.data.startswith("save_"):
+        trade_id = call.data.replace("save_", "")
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
+        bot.send_message(chat_id, "💾 Saved to your journal. Check /history anytime.")
+
+    elif call.data.startswith("win_") or call.data.startswith("loss_"):
+        outcome, trade_id = call.data.split("_")
+        outcome = "win" if outcome == "win" else "loss"
+        close_trade(chat_id, int(trade_id), outcome)
+        bot.delete_message(chat_id, call.message.message_id)
+        send_journal(chat_id)
 
 
 def calc_balance(message):
@@ -164,20 +220,29 @@ def calc_stop(message):
         bot.send_message(chat_id, "Entry and stop loss can't be the same price. Send /calculate to try again.")
         return
 
+    trade_id = add_trade(
+        chat_id, data["instrument"], data["entry"], stop_price,
+        result["lot_size"], result["risk_amount"], result["direction"]
+    )
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("📝 View in Journal", callback_data="history"))
+
     bot.send_message(
         chat_id,
         f"📊 <b>Position Sizing Result</b>\n\n"
         f"Instrument: <b>{data['instrument']}</b>\n"
+        f"Direction: <b>{result['direction']}</b>\n"
         f"Risk amount: <b>${result['risk_amount']}</b>\n"
         f"Position size: <b>{result['units']} units</b>\n"
         f"Lot size: <b>{result['lot_size']} lots</b>\n\n"
+        f"✅ Automatically saved to your journal as #{trade_id}.\n\n"
         f"⚠️ <i>This is a math calculation based on your inputs only, not financial advice.</i>",
-        reply_markup=main_menu_keyboard()
+        reply_markup=kb
     )
     user_data.pop(chat_id, None)
 
 
-# ---- Webhook route ----
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     try:
