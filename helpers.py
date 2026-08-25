@@ -58,109 +58,32 @@ def _rsi(closes, period=14):
     return round(100 - (100 / (1 + rs)), 1)
 
 
-def _timeframe_signal(closes):
-    """Returns (score, label, rsi) for one timeframe's closing prices."""
-    if len(closes) < 30:
-        return None
-    sma10 = sum(closes[-10:]) / 10
-    sma30 = sum(closes[-30:]) / 30
-    trend_up = sma10 > sma30
-    rsi = _rsi(closes, 14)
-
-    if rsi is None:
-        score = 1 if trend_up else -1
-        label = "Bullish" if trend_up else "Bearish"
-        return score, label, None
-
-    if trend_up and rsi < 70:
-        return 1, "Bullish", rsi
-    elif trend_up and rsi >= 70:
-        return 0.5, "Bullish (OB)", rsi
-    elif not trend_up and rsi > 30:
-        return -1, "Bearish", rsi
-    elif not trend_up and rsi <= 30:
-        return -0.5, "Bearish (OS)", rsi
-    else:
-        return 0, "Neutral", rsi
-
-
-def _swing_structure(highs, lows, window=2):
-    """
-    Detects simple swing-high/swing-low market structure from a daily
-    candle series. Compares the last two swing highs and last two swing
-    lows to classify as HH+HL (uptrend structure), LH+LL (downtrend
-    structure), or Mixed.
-    """
-    pivot_highs, pivot_lows = [], []
-    n = len(highs)
-    for i in range(window, n - window):
-        if all(highs[i] > highs[i - k] for k in range(1, window + 1)) and \
-           all(highs[i] > highs[i + k] for k in range(1, window + 1)):
-            pivot_highs.append(highs[i])
-        if all(lows[i] < lows[i - k] for k in range(1, window + 1)) and \
-           all(lows[i] < lows[i + k] for k in range(1, window + 1)):
-            pivot_lows.append(lows[i])
-
-    if len(pivot_highs) < 2 or len(pivot_lows) < 2:
-        return None
-
-    higher_high = pivot_highs[-1] > pivot_highs[-2]
-    higher_low = pivot_lows[-1] > pivot_lows[-2]
-
-    if higher_high and higher_low:
-        return "HH+HL", 1
-    elif not higher_high and not higher_low:
-        return "LH+LL", -1
-    else:
-        return "Mixed", 0
-
-
 def get_bias(name):
     """
-    Shows Technical Bias (RSI + trend on 1H/4H/Daily) and Structure Bias
-    (swing HH/HL vs LH/LL on 4H/Daily) as two separate readings, so you can
-    see whether momentum and price structure agree or disagree. This is a
-    basic technical signal, NOT a prediction or financial advice.
+    Simple trend-based bias: compares a short-term average (10 candles)
+    to a longer-term average (30 candles) on the daily chart.
+    This is a basic trend signal, NOT a prediction or financial advice.
     """
     symbol = SYMBOLS[name]
-    timeframes = [("1H", "1h"), ("4H", "4h"), ("Daily", "1day")]
-    technical_lines = []
-    structure_lines = []
-
-    for tf_label, interval in timeframes:
-        url = (f"https://api.twelvedata.com/time_series?symbol={symbol}"
-               f"&interval={interval}&outputsize=50&apikey={TWELVE_DATA_KEY}")
-        try:
-            r = requests.get(url, timeout=10).json()
-            values = list(reversed(r["values"]))
-            closes = [float(c["close"]) for c in values]
-
-            signal = _timeframe_signal(closes)
-            if signal is None:
-                technical_lines.append(f"{tf_label}: n/a")
-            else:
-                score, label, rsi = signal
-                rsi_str = f" RSI {rsi}" if rsi is not None else ""
-                technical_lines.append(f"{tf_label}: {label}{rsi_str}")
-
-            # Structure only on 4H and Daily - 1H swings are too noisy to be reliable
-            if tf_label in ("4H", "Daily"):
-                highs = [float(c["high"]) for c in values]
-                lows = [float(c["low"]) for c in values]
-                structure = _swing_structure(highs, lows)
-                if structure:
-                    struct_label, _ = structure
-                    structure_lines.append(f"{tf_label}: {struct_label}")
-                else:
-                    structure_lines.append(f"{tf_label}: n/a")
-        except Exception:
-            technical_lines.append(f"{tf_label}: n/a")
-
-    technical_str = " | ".join(technical_lines) if technical_lines else "Unavailable"
-    structure_str = " | ".join(structure_lines) if structure_lines else "Unavailable"
-
-    return (f"📈 <i>Technical: {technical_str}</i>\n"
-            f"   🏗️ <i>Structure: {structure_str}</i>")
+    url = (f"https://api.twelvedata.com/time_series?symbol={symbol}"
+           f"&interval=1day&outputsize=30&apikey={TWELVE_DATA_KEY}")
+    try:
+        r = requests.get(url, timeout=10).json()
+        closes = [float(c["close"]) for c in r["values"]]
+        closes.reverse()
+        if len(closes) < 30:
+            return "Not enough data"
+        sma10 = sum(closes[-10:]) / 10
+        sma30 = sum(closes[-30:]) / 30
+        diff_pct = (sma10 - sma30) / sma30 * 100
+        if diff_pct > 0.5:
+            return "🟢 Bullish"
+        elif diff_pct < -0.5:
+            return "🔴 Bearish"
+        else:
+            return "⚪ Neutral / Sideways"
+    except Exception:
+        return "Unavailable"
 
 
 def get_news(limit=5):
@@ -200,7 +123,7 @@ def build_market_report():
     lines.append("📰 <b>Latest News</b>")
     lines += get_news()
     lines.append("")
-    lines.append("💰 <b>Prices & Bias</b> <i>(1H + 4H + Daily combined)</i>")
+    lines.append("💰 <b>Prices & Bias</b>")
     for name in ["GOLD", "SILVER", "BITCOIN", "ETHEREUM"]:
         price = get_price(name)
         bias = get_bias(name)
