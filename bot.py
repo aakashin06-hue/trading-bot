@@ -10,7 +10,7 @@ from telebot import types
 from helpers import build_market_report, calculate_position, LOT_SIZES
 
 # ============ FILL THIS IN ============
-BOT_TOKEN = "8772965274:AAH-oULagaBtC1lEkojRslTqkD18ifjTY6c""
+BOT_TOKEN = "8772965274:AAH-oULagaBtC1lEkojRslTqkD18ifjTY6c"
 # =======================================
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
